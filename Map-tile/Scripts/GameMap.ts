@@ -18,7 +18,9 @@ export class GameMap extends Component {
         this.mapManager.init();
     }
 
-
+    onClickNav() {
+        this.mapManager.navPath();
+    }
 
 }
 

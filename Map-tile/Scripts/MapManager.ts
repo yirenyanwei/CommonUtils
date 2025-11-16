@@ -1,6 +1,9 @@
 import { _decorator, Camera, Component, EventTouch, instantiate, Node, Prefab, rect, size, Size, TiledMap, UITransform, v2, v3, Vec2, view } from 'cc';
 import { MapTile } from './MapTile';
 import { MapTileData } from './MapTileData';
+import { MapLayer } from './types-map';
+import { MapHelper } from './MapHelper';
+import { TMAStar } from './TMAStar';
 const { ccclass, property } = _decorator;
 
 @ccclass('MapManager')
@@ -16,12 +19,17 @@ export class MapManager extends Component {
     @property(Node)
     public touchNode: Node = null!;
     @property(Prefab)
-    public tilePrefab: Prefab = null!;
+    public tileNumPrefab: Prefab = null!;
+    @property(Prefab)
+    public tileBgPrefab: Prefab = null!;
 
+    public layerParents: Map<MapLayer, Node> = new Map();
     private _mapSize: Size = null!;
     private _tileSize: Size = null!;
     private _mapContentSize: Size = null!;
-    private _tileDatas: MapTileData[][] = [];
+    private _tileDataMap: Map<MapLayer, MapTileData[][]> = new Map();
+    // 导航数据
+    private _navData: boolean[][] = [];
     public init() {
         this._initMap();
     }
@@ -44,27 +52,64 @@ export class MapManager extends Component {
         this._mapSize = this.map.getMapSize();
         this._tileSize = this.map.getTileSize();
         this._mapContentSize = size(this._mapSize.width * this._tileSize.width, this._mapSize.height * this._tileSize.height);
-        for(let i = 0; i<this._mapSize.width; i++) {
-            let row = i;
-            this._tileDatas[row] = [];
-            for(let j = 0; j<this._mapSize.height; j++) {
-                let col = this._mapSize.height - j - 1;
-                const data = new MapTileData();
-                data.init(row, col);
-                this._tileDatas[row][col] = data;
+        // 遍历层
+        const layers = MapHelper.getEnumValues(MapLayer);
+        for(const layer in layers) {
+            const layerName = layers[layer];
+            const layerParent = new Node(layerName);
+            layerParent.parent = this.tiles;
+            this.layerParents.set(layerName, layerParent);
+            if(layerName == MapLayer.Data) {
+                continue;
+            }
+            const tileDatas = [];
+            this._tileDataMap.set(layerName, tileDatas);
+            for(let i = 0; i<this._mapSize.width; i++) {
+                let row = i;
+                tileDatas[row] = [];
+                for(let j = 0; j<this._mapSize.height; j++) {
+                    let col = this._mapSize.height - j - 1;
+                    const data = new MapTileData();
+                    data.init(row, col, layerName);
+                    tileDatas[row][col] = data;
+                }
             }
         }
+
+        const navLayer = this.map.getLayer(MapLayer.Data);
+        for(let i = 0; i<this._mapSize.width; i++) {
+            let row = i;
+            this._navData[row] = [];
+            for(let j = 0; j<this._mapSize.height; j++) {
+                const col = this._mapSize.height - j - 1;
+                const gid = navLayer.getTileGIDAt(row, col);
+                const nav = gid<=0;
+                this._navData[row][col] = nav;
+            }
+        }
+
         this.scheduleOnce(()=>{
             this.updateMapTiles();
         }, 0);
-
+        this.map.node.active = false;
     }
 
-    public createTileNode(row: number, col: number) {
-        const node = instantiate(this.tilePrefab);
-        node.name = `tile_${row}_${col}`;
-        node.setPosition((row-this._mapSize.width/2) * this._tileSize.width + this._tileSize.width/2, (this._mapSize.height/2-col) * this._tileSize.height - this._tileSize.height/2, 0);
-        this.tiles.addChild(node);
+    public createTileNode(row: number, col: number, layer: MapLayer) {
+        let node: Node = null!;
+        switch (layer) {
+            case MapLayer.BG:
+                node = instantiate(this.tileBgPrefab);
+                break;
+            case MapLayer.Num:
+                node = instantiate(this.tileNumPrefab);
+                break;
+        }
+        
+        if(node) {
+            node.name = `tile_${row}_${col}`;
+            node.setPosition((row-this._mapSize.width/2) * this._tileSize.width + this._tileSize.width/2, (this._mapSize.height/2-col) * this._tileSize.height - this._tileSize.height/2, 0);
+            this.layerParents.get(layer)?.addChild(node);
+        }
         return node;
     }
 
@@ -104,6 +149,17 @@ export class MapManager extends Component {
         return v2(x, y);
     }
 
+    private _showTile(row: number, col: number, layer: MapLayer) {
+        const tileDatas = this._tileDataMap.get(layer);
+        if(!tileDatas) return;
+        tileDatas[row]?.[col]?.showTile(); 
+    }
+    private _hideTile(row: number, col: number, layer: MapLayer) {
+        const tileDatas = this._tileDataMap.get(layer);
+        if(!tileDatas) return;
+        tileDatas[row]?.[col]?.hideTile();
+    }
+
 
     private _startRoll = -1;
     private _startCol = -1;
@@ -120,15 +176,18 @@ export class MapManager extends Component {
         if(mapIndex.x == this._startRoll && mapIndex.y == this._startCol) {
             return;
         }
+        const layers = MapHelper.getEnumValues(MapLayer);
         if(this._startRoll<0) {
-            for(let i = mapIndex.x; i<mapIndex.x+maxRow; i++) {
-                for(let j = mapIndex.y; j<mapIndex.y+maxCol; j++) {
-                    const data = this._tileDatas[i][j];
-                    if(data) {
-                        data.showTile();
+            for(const layer of layers) {
+                if(!this._tileDataMap.has(layer)) {
+                    continue;
+                }
+                for(let i = mapIndex.x; i<mapIndex.x+maxRow; i++) {
+                    for(let j = mapIndex.y; j<mapIndex.y+maxCol; j++) {
+                        this._showTile(i, j, layer);
                     }
                 }
-             }
+            }
         }else {
             const axMin = this._startRoll;
             const ayMin = this._startCol;
@@ -144,30 +203,29 @@ export class MapManager extends Component {
             const width = Math.min(axMax, bxMax) - x;
             const height = Math.min(ayMax, byMax) - y;
             const intersection = width>0 && height>0;
-            // 添加
-            for(let i = mapIndex.x; i<mapIndex.x+maxRow; i++) {
-                for(let j = mapIndex.y; j<mapIndex.y+maxCol; j++) {
-                    if(intersection && i>=x && i<x+width && j>=y && j<y+height) {
-                        continue;
-                    }
-                    const data = this._tileDatas[i]?.[j];
-                    if(data) {
-                        data.showTile();
+            for(const layer of layers) {
+                if(!this._tileDataMap.has(layer)) {
+                    continue;
+                }
+                // 添加
+                for(let i = mapIndex.x; i<mapIndex.x+maxRow; i++) {
+                    for(let j = mapIndex.y; j<mapIndex.y+maxCol; j++) {
+                        if(intersection && i>=x && i<x+width && j>=y && j<y+height) {
+                            continue;
+                        }
+                        this._showTile(i, j, layer);
                     }
                 }
-             }
-             // 删除
-             for(let i = this._startRoll; i<this._startRoll+maxRow; i++) {
-                for(let j = this._startCol; j<this._startCol+maxCol; j++) {
-                    if(intersection && i>=x && i<x+width && j>=y && j<y+height) {
-                        continue;
-                    }
-                    const data = this._tileDatas[i]?.[j];
-                    if(data) {
-                        data.hideTile();
+                // 删除
+                for(let i = this._startRoll; i<this._startRoll+maxRow; i++) {
+                    for(let j = this._startCol; j<this._startCol+maxCol; j++) {
+                        if(intersection && i>=x && i<x+width && j>=y && j<y+height) {
+                            continue;
+                        }
+                        this._hideTile(i, j, layer);
                     }
                 }
-              }
+            }
         }
         this._startRoll = mapIndex.x;
         this._startCol = mapIndex.y;
@@ -186,12 +244,13 @@ export class MapManager extends Component {
         const maxCol = Math.ceil(visibleSize.height / this._tileSize.height);
 
         const addMap = new Map<string, Vec2>();
+        const tileDatas = this._tileDataMap.get(MapLayer.Num);
         // 添加
         const addStart = v2(mapIndex.x, mapIndex.y);
         const addEnd = v2(mapIndex.x + maxRow, mapIndex.y + maxCol);
         for(let i = addStart.x; i <= addEnd.x; i++) {
             for(let j = addStart.y; j <= addEnd.y; j++) {
-                const tile = this._tileDatas[i]?.[j];
+                const tile = tileDatas[i]?.[j];
                 if(tile) {
                     addMap.set(`${i}_${j}`, v2(i, j));
                 }
@@ -204,36 +263,45 @@ export class MapManager extends Component {
             const delEnd = v2(this._startRoll + maxRow, this._startCol + maxCol);
             for(let i = delStart.x; i <= delEnd.x; i++) {
                 for(let j = delStart.y; j <= delEnd.y; j++) {
-                    const tile = this._tileDatas[i]?.[j];
+                    const tile = tileDatas[i]?.[j];
                     if(tile) {
                         delMap.set(`${i}_${j}`, v2(i, j));
                     }
                 }
             }
         }
-
-        addMap.forEach((pos, key) => { 
-            if(delMap.has(key)){
-                return;
+        const layers = MapHelper.getEnumValues(MapLayer);
+        for(const layer of layers) {
+            const _tileDatas = this._tileDataMap.get(layer);
+            if(!_tileDatas) {
+                continue;
             }
-            console.log("add Map", key);
-            const tile = this._tileDatas[pos.x]?.[pos.y];
-            if(tile) {
-                tile.showTile();
-            }
-        });
-        delMap.forEach((pos, key) => { 
-            if(addMap.has(key)){
-                return;
-            }
-            console.log("del Map", key);
-            const tile = this._tileDatas[pos.x]?.[pos.y];
-            if(tile) {
-                tile.hideTile();
-            }
-        });
+            addMap.forEach((pos, key) => { 
+                if(delMap.has(key)){
+                    return;
+                }
+                console.log("add Map", key);
+                this._showTile(pos.x, pos.y, layer);
+            });
+            delMap.forEach((pos, key) => { 
+                if(addMap.has(key)){
+                    return;
+                }
+                console.log("del Map", key);
+                this._hideTile(pos.x, pos.y, layer);
+            }); 
+        }
+        
         this._startRoll = mapIndex.x;
         this._startCol = mapIndex.y;
+    }
+
+    public navPath() {
+        const ret = TMAStar.AStar(this._navData, 13, 20, 31, 21);
+        const bgDatas = this._tileDataMap.get(MapLayer.BG);
+        for(let i = 0; i<ret.length; i++) {
+            bgDatas[ret[i].x][ret[i].y].showNav();
+        }
     }
 }
 
